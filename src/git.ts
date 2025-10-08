@@ -1,123 +1,295 @@
-import { Octokit } from '@octokit/rest'; 
-import JSZip from 'jszip';
+import { Octokit } from "@octokit/rest";
+import JSZip from "jszip";
 
-export interface Coverage {
-    [file: string]: CoverageFile;
-}
+export type Coverage = Record<string, CoverageFile>;
 
 export interface Position {
-    line: number;
-    column: number | null
+  line: number;
+  column: number | null;
 }
 
 export interface Block {
-    start: Position;
-    end: Position;
+  start: Position;
+  end: Position;
 }
 
 export interface CoverageFile {
-    path: string;
-    statementMap: {
-        [block: string]: Block
-    };
-    branchMap: {
-
+  path: string;
+  statementMap: Record<string, Block>;
+  branchMap: Record<string, unknown>;
+  fnMap: Record<
+    string,
+    {
+      name: string;
+      decl: Block;
+      loc: Block;
     }
-    fnMap: {
-        [block: string]: {
-            name: string;
-            decl: Block;
-            loc: Block;
-        }
-    };
-    s: {
-        [block: string]: number;
-    };
-    f: {
-        [block: string]: number;
-    };
-    b: {
-        [block: string]: number;
-    } | {};
+  >;
+  s: Record<string, number>;
+  f: Record<string, number>;
+  b: Record<string, number>;
 }
+
+export const parseCoberturaXml = (xmlText: string): Coverage => {
+  const coverage: Coverage = {};
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(xmlText, "application/xml");
+  const classNodes = Array.from(doc.getElementsByTagName("class"));
+
+  classNodes.forEach((cls) => {
+    const filenameAttr =
+      cls.getAttribute("filename") || cls.getAttribute("name") || "";
+    if (!filenameAttr) {
+      return;
+    }
+
+    if (!coverage[filenameAttr]) {
+      coverage[filenameAttr] = {
+        path: filenameAttr,
+        statementMap: {},
+        branchMap: {},
+        fnMap: {},
+        s: {},
+        f: {},
+        b: {},
+      };
+    }
+
+    const fileCoverage = coverage[filenameAttr];
+
+    const lineNodes = Array.from(cls.getElementsByTagName("line"));
+    lineNodes.forEach((lineNode) => {
+      const numberAttr = lineNode.getAttribute("number");
+      if (!numberAttr) return;
+      const hitsAttr = lineNode.getAttribute("hits") || "0";
+      const lineNumber = parseInt(numberAttr, 10);
+      if (Number.isNaN(lineNumber)) return;
+      const key = String(lineNumber);
+
+      if (!fileCoverage.statementMap[key]) {
+        fileCoverage.statementMap[key] = {
+          start: { line: lineNumber, column: null },
+          end: { line: lineNumber, column: null },
+        };
+      }
+
+      const incomingHits = parseInt(hitsAttr, 10) || 0;
+      const existingHits = fileCoverage.s[key] ?? 0;
+      fileCoverage.s[key] = Math.max(existingHits, incomingHits);
+    });
+  });
+
+  return coverage;
+};
 
 export class Git {
+  constructor(private readonly octokit: Octokit) {}
 
-    constructor(private octokit: Octokit) {
+  normalizePaths(repo: string, coverage: Coverage): Coverage {
+    const updatedCoverage: Coverage = {};
+    Object.entries(coverage).forEach(([file, data]) => {
+      const index = file.lastIndexOf(repo);
+      const path =
+        index === -1 ? file : file.substring(index + repo.length + 1);
+      updatedCoverage[path] = {
+        ...data,
+        path,
+      };
+    });
+    return updatedCoverage;
+  }
 
-    }
-    
-    normalizePaths (repo: string, coverage: Coverage) {
-        let updatedCoverage: Coverage = {};
-        Object.keys(coverage).forEach((file) => {
-            const index = file.lastIndexOf(repo);
-            const path = file.substring(index+repo.length+1); // +1 for the slash
-            updatedCoverage[path] = {
-                ...coverage[file],
-                path: path,
-            };
+  private buildCoverageCacheKey(
+    owner: string,
+    repo: string,
+    workflowRunId: number
+  ) {
+    return `coverage_cache:${owner}/${repo}/${workflowRunId}`;
+  }
+
+  private async tryReadCoverageFromLocalCache(
+    owner: string,
+    repo: string,
+    workflowRunId: number
+  ): Promise<Coverage | null> {
+    try {
+      // Guard for non-extension/test environments
+      if (
+        typeof chrome === "undefined" ||
+        !chrome.storage ||
+        !chrome.storage.local
+      ) {
+        return null;
+      }
+      const key = this.buildCoverageCacheKey(owner, repo, workflowRunId);
+      return await new Promise((resolve) => {
+        chrome.storage.local.get([key], (result) => {
+          const stored = result ? result[key] : null;
+          if (!stored) {
+            resolve(null);
+            return;
+          }
+          try {
+            const value =
+              typeof stored === "string"
+                ? (JSON.parse(stored) as Coverage)
+                : (stored as Coverage);
+            resolve(value);
+          } catch (_error) {
+            resolve(null);
+          }
         });
-        return updatedCoverage;
+      });
+    } catch (_e) {
+      return null;
     }
-    
-    async getCoverageForRun (owner: string, repo: string, runId: number) {
-        
-        const job = (await this.octokit.rest.actions.getJobForWorkflowRun({
-          owner : owner,
-          repo : repo,
-          job_id : runId,
-        })).data;
-    
-        const actions_run = (await this.octokit.rest.actions.getWorkflowRun({
-          owner : owner,
-          repo : repo,
-          run_id : job.run_id,
-        })).data;
-    
-    
-        const artifacts = await this.octokit.actions.listWorkflowRunArtifacts({
-          owner: owner,
-          repo: repo,
-          run_id: actions_run.id,
-          
-        })
-    
-        const coverageArtifacts = artifacts.data.artifacts.filter((a) => a.name.includes("coverage") && a.name.includes(".json"))
-        
-        if (coverageArtifacts.length > 0) {
-          const coverageArtifact = coverageArtifacts[0];
-          const coveragezip = await this.octokit.actions.downloadArtifact({
-              owner,
-              repo,
-              artifact_id: coverageArtifact.id,
-              archive_format: "zip",
-          });
-          const coverage = await JSZip.loadAsync(coveragezip.data as any).then((zip) => {
-              const coverageContent = zip.files['coverage-final.json'];
-              return coverageContent.async('text').then((content) => JSON.parse(content))
-          });
-          return coverage;
-        }
-        return null;
-    }
-    
-    
-    async getCoverage ({ owner, repo, pull }: { owner: string, repo: string, pull: number}) {
-     
-        const pullRequest = (await this.octokit.rest.pulls.get({ owner, repo, pull_number: pull })).data;
-        const check_runs = (await this.octokit.rest.checks.listForRef({ owner, repo, ref: pullRequest.head.sha })).data.check_runs;
-      
-        const githubActionRuns = check_runs.filter((run) => run.app?.slug === 'github-actions');
-        // check all artifacts
-        for (let i = 0; i < githubActionRuns.length; i++) {
-            const run = githubActionRuns[i];
-            const coverage = await this.getCoverageForRun(owner, repo, run.id);
-            if (!coverage) {
-                continue;
-            }
-            return this.normalizePaths(repo, coverage);
-        }
-        return null;
-    }
-}
+  }
 
+  private async tryWriteCoverageToLocalCache(
+    owner: string,
+    repo: string,
+    workflowRunId: number,
+    coverage: Coverage
+  ): Promise<void> {
+    try {
+      if (
+        typeof chrome === "undefined" ||
+        !chrome.storage ||
+        !chrome.storage.local
+      ) {
+        return;
+      }
+      const key = this.buildCoverageCacheKey(owner, repo, workflowRunId);
+      const payload: Record<string, string> = {
+        [key]: JSON.stringify(coverage),
+      };
+      chrome.storage.local.set(payload);
+    } catch (_e) {
+      // no-op: caching is best-effort
+    }
+  }
+
+  async getCoverageForRun(
+    owner: string,
+    repo: string,
+    runId: number
+  ): Promise<Coverage | null> {
+    const job = await this.octokit.rest.actions.getJobForWorkflowRun({
+      owner,
+      repo,
+      job_id: runId,
+    });
+
+    const workflowRunId = job.data.run_id;
+    const actionsRun = await this.octokit.rest.actions.getWorkflowRun({
+      owner,
+      repo,
+      run_id: workflowRunId,
+    });
+
+    // Check local cache by workflow run id before downloading artifacts
+    const cached = await this.tryReadCoverageFromLocalCache(
+      owner,
+      repo,
+      actionsRun.data.id
+    );
+    if (cached) {
+      return cached;
+    }
+
+    const artifacts = await this.octokit.rest.actions.listWorkflowRunArtifacts({
+      owner,
+      repo,
+      run_id: actionsRun.data.id,
+    });
+
+    const coverageArtifact = artifacts.data.artifacts.find((artifact) => {
+      const name = artifact.name.toLowerCase();
+      return name.includes("coverage") || name.includes("cobertura");
+    });
+
+    if (!coverageArtifact) {
+      return null;
+    }
+
+    const coverageZip = await this.octokit.rest.actions.downloadArtifact({
+      owner,
+      repo,
+      artifact_id: coverageArtifact.id,
+      archive_format: "zip",
+    });
+
+    const coverage = await JSZip.loadAsync(
+      coverageZip.data as ArrayBuffer
+    ).then(async (zip) => {
+      const jsonDirect = zip.files["coverage-final.json"];
+      if (jsonDirect) {
+        const content = await jsonDirect.async("text");
+        return JSON.parse(content) as Coverage;
+      }
+      const jsonFallbackKey = Object.keys(zip.files).find((key) => {
+        const lower = key.toLowerCase();
+        return lower.endsWith(".json") && lower.includes("coverage");
+      });
+      if (jsonFallbackKey) {
+        const content = await zip.files[jsonFallbackKey].async("text");
+        return JSON.parse(content) as Coverage;
+      }
+
+      const xmlKey = Object.keys(zip.files).find((key) => {
+        const lower = key.toLowerCase();
+        return (
+          lower.endsWith(".xml") &&
+          (lower.includes("cobertura") || lower.includes("coverage"))
+        );
+      });
+      if (xmlKey) {
+        const xmlText = await zip.files[xmlKey].async("text");
+        return parseCoberturaXml(xmlText);
+      }
+      return null;
+    });
+    if (coverage) {
+      await this.tryWriteCoverageToLocalCache(
+        owner,
+        repo,
+        actionsRun.data.id,
+        coverage
+      );
+    }
+    return coverage;
+  }
+
+  async getCoverage({
+    owner,
+    repo,
+    pull,
+  }: {
+    owner: string;
+    repo: string;
+    pull: number;
+  }): Promise<Coverage | null> {
+    const pullRequest = await this.octokit.rest.pulls.get({
+      owner,
+      repo,
+      pull_number: pull,
+    });
+    const checkRuns = await this.octokit.rest.checks.listForRef({
+      owner,
+      repo,
+      ref: pullRequest.data.head.sha,
+    });
+
+    const githubActionRuns = checkRuns.data.check_runs.filter(
+      (run) => run.app?.slug === "github-actions"
+    );
+
+    for (const run of githubActionRuns) {
+      const coverage = await this.getCoverageForRun(owner, repo, run.id);
+      if (coverage) {
+        return this.normalizePaths(repo, coverage);
+      }
+    }
+    return null;
+  }
+}

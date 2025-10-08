@@ -1,136 +1,134 @@
-import {
-    Coverage,
-    CoverageFile,
-    Git,
-} from "./git";
 import $ from "jquery";
-
-export enum UiMode {
-    Inline = "inline",
-    Border = "border",
-}
+import { Coverage, CoverageFile, Git } from "./git";
 
 export interface PR {
-    owner: string;
-    repo: string;
-    pull: string;
+  owner: string;
+  repo: string;
+  pull: string;
 }
 export class CoverageLoader {
+  #coverage: Coverage | undefined;
+  #coverageShown = false;
+  #pr: PR | undefined;
 
-    coverage: Coverage | undefined = undefined
-    coverageShown: boolean = false;
-    pr: PR | undefined; 
+  constructor(private readonly git: Git) {}
 
-    constructor(private git: Git, private uiMode: UiMode) {}
+  get coverage(): Coverage | undefined {
+    return this.#coverage;
+  }
 
+  get coverageShown(): boolean {
+    return this.#coverageShown;
+  }
 
-    async loadCoverage(url: PR) {
+  get pr(): PR | undefined {
+    return this.#pr;
+  }
 
-        // const url = this.parseUrl();
-        // if (!url) return;
+  async loadCoverage(pr: PR): Promise<void> {
+    const { owner, repo, pull } = pr;
+    const coverage = await this.git.getCoverage({
+      owner,
+      repo,
+      pull: Number(pull),
+    });
 
-        const {
-            owner,
-            repo,
-            pull
-        } = url;
-
-        const coverage = await this.git.getCoverage({
-            owner,
-            repo,
-            pull: Number(pull)
-        })
-        if (!coverage) {
-            console.log("Coverage file not found.")
-            return;
-        }
-        this.coverage = coverage;
+    if (!coverage) {
+      console.info("Coverage file not found.");
+      return;
     }
 
-    showCoverage() {
-        this.toggleCoverageUI(true);
+    this.#coverage = coverage;
+  }
+
+  showCoverage(): void {
+    void this.toggleCoverageUI(true);
+  }
+
+  hideCoverage(): void {
+    void this.toggleCoverageUI(false);
+  }
+
+  async toggleCoverageUI(show: boolean): Promise<void> {
+    if (!this.#coverage) {
+      return;
     }
 
-    hideCoverage() {
-        this.toggleCoverageUI(false);
+    this.#coverageShown = show;
+    const files = Object.values(this.#coverage);
+    files.forEach((file) => this.highlightFile(file, show));
+  }
+
+  highlightLine(
+    line: number,
+    covered: boolean,
+    fileDom: JQuery<Element>,
+    show: boolean
+  ): void {
+    const diffAnchor = fileDom.data("diffAnchor");
+    if (!diffAnchor) {
+      return;
     }
 
-    async toggleCoverageUI(show: boolean) {
-        if (!this.coverage) return;
-        this.coverageShown = show;
-        const files = Object.keys(this.coverage);
-        for (let i = 0; i < files.length; i++) {
-            const file = files[i];
-            this.hightlightFile(this.coverage[file], show)
-        }
-        console.log("UI for coverage updated")
+    const tdDom = fileDom.find(`td[data-line-anchor="${diffAnchor}R${line}"]`);
+    if (show) {
+      tdDom.toggleClass("cobertura-coverage-green-border", covered);
+      tdDom.toggleClass("cobertura-coverage-red-border", !covered);
+      return;
     }
 
-    async highlightLine(line: number, covered: boolean, fileDom: JQuery < Element >, show: boolean) {
-        const lineContainer = fileDom.find(`[data-line-number="${line}"]`).parent();
-        if (this.uiMode === UiMode.Inline) {
-            const lineDom = lineContainer.find(".blob-code-inner");
-            if (show) {
-                if (covered) {
-                    lineDom.addClass("jest-coverage-green")
-                } else {
-                    lineDom.addClass("jest-coverage-red")
-                }
-            } else {
-                lineDom.removeClass("jest-coverage-green");
-                lineDom.removeClass("jest-coverage-red");
-            }
-        } else {
-            const tdDom = lineContainer.find("td.blob-code");
-            if (show) {
-                if (covered) {
-                    tdDom.addClass("jest-coverage-green-border")
-                } else {
-                    tdDom.addClass("jest-coverage-red-border")
-                }
-            } else {
-                tdDom.removeClass("jest-coverage-green-border")
-                tdDom.removeClass("jest-coverage-red-border")
-            }
-        }
-        
+    tdDom.removeClass("cobertura-coverage-green-border cobertura-coverage-red-border");
+  }
+
+  highlightFileName(fileName: string, show: boolean): void {
+    if (!this.#coverage) {
+      console.info("Coverage not loaded");
+      return;
     }
 
-    hightlightFile(fileCovereage: CoverageFile, show: boolean) {
-        const fileDom = $(`[data-tagsearch-path="${fileCovereage.path}"]`);
-
-        const statmentsBlocks = Object.keys(fileCovereage.statementMap);
-        for (let i = 0; i < statmentsBlocks.length; i++) {
-            const block = statmentsBlocks[i];
-            const statmentBlock = fileCovereage.statementMap[block];
-            for (let line = statmentBlock.start.line; line <= statmentBlock.end.line; line++) {
-                this.highlightLine(line, fileCovereage.s[block] > 0, fileDom, show);
-            }
-        }
-        const fnBlocks = Object.keys(fileCovereage.fnMap);
-        for (let i = 0; i < fnBlocks.length; i++) {
-            const block = fnBlocks[i];
-            const fnBlock = fileCovereage.fnMap[block];
-            this.highlightLine(fnBlock.decl.start.line, fileCovereage.f[block] > 0, fileDom, show);
-        }
-
+    const fileCoverage = this.#coverage[fileName];
+    if (!fileCoverage) {
+      console.info("File %s not found in coverage", fileName);
+      return;
     }
 
-    parseUrl() {
-        const regex = /github\.com\/(.*?)\/(.*?)\/pull\/(.*?)\/files(.*)$/gm;
-        const url = window.document.location.href;
-        const matches = regex.exec(url);
-        if (!matches || matches.length < 4) {
-            console.log(`Couldn\'t match ${url} to github pull request files changes page regex.`);
-            return null;
-        }
-        const owner = matches[1];
-        const repo = matches[2];
-        const pull = matches[3];
-        return { owner, repo, pull} as PR;
-    }
+    this.highlightFile(fileCoverage, show);
+  }
 
-    setPr(pr: PR) {
-        this.pr = pr;
+  highlightFile(fileCoverage: CoverageFile, show: boolean): void {
+    const fileDom = $(`table[aria-label~="${fileCoverage.path}"]`);
+
+    Object.entries(fileCoverage.statementMap).forEach(([block, segment]) => {
+      for (let line = segment.start.line; line <= segment.end.line; line += 1) {
+        this.highlightLine(line, fileCoverage.s[block] > 0, fileDom, show);
+      }
+    });
+
+    Object.entries(fileCoverage.fnMap).forEach(([block, fnBlock]) => {
+      this.highlightLine(
+        fnBlock.decl.start.line,
+        fileCoverage.f[block] > 0,
+        fileDom,
+        show
+      );
+    });
+  }
+
+  parseUrl(): PR | null {
+    const regex = /github\.com\/(.*?)\/(.*?)\/pull\/(.*?)\/files(.*)$/;
+    const url = window.document.location.href;
+    const matches = regex.exec(url);
+    if (!matches || matches.length < 4) {
+      console.info(
+        `Could not match ${url} to GitHub pull request files changes page regex.`
+      );
+      return null;
     }
+    const [owner, repo, pull] = matches.slice(1, 4);
+    return { owner, repo, pull } satisfies PR;
+  }
+
+  setPr(pr: PR | undefined): void {
+    this.#pr = pr;
+  }
 }
