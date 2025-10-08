@@ -47,7 +47,8 @@ const Popup = () => {
             GitHub Coverage Access
           </h1>
           <p className="text-sm text-slate-600">
-            Provide a personal access token with repo access to download coverage artifacts.
+            Provide a personal access token with repo access to download
+            coverage artifacts.
           </p>
         </div>
       </div>
@@ -96,14 +97,19 @@ const Popup = () => {
         >
           Save
         </Button>
-        <Button type="button" className="flex-1 shadow-md" onClick={() => save(true)}>
+        <Button
+          type="button"
+          className="flex-1 shadow-md"
+          onClick={() => save(true)}
+        >
           Save & Reload Tab
         </Button>
       </div>
 
       <p className="mt-6 text-xs leading-relaxed text-slate-600">
-        We keep your token securely in Chrome&apos;s extension storage and use it only to fetch coverage
-        reports. Clear it anytime from the extension settings.
+        We keep your token securely in Chrome&apos;s extension storage and use
+        it only to fetch coverage reports. Clear it anytime from the extension
+        settings.
       </p>
     </div>
   );

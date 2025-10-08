@@ -2,6 +2,11 @@ const notifyContentScript = (
   tabId: number,
   message: Record<string, unknown>
 ) => {
+  if (!Number.isInteger(tabId) || tabId < 0) {
+    console.debug("Ignoring message for invalid tab", tabId, message);
+    return;
+  }
+
   chrome.tabs.sendMessage(tabId, message, () => {
     const error = chrome.runtime.lastError;
     if (error) {
